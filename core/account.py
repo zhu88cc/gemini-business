@@ -390,10 +390,9 @@ def load_multi_account_config(
             disabled=acc.get("disabled", False)  # 读取手动禁用状态，默认为 False
         )
 
-        # 检查账户是否已过期
+        # 过期账户也加载（前端显示用），API调用时通过 get_account() 的过滤逻辑会自动排除
         if config.is_expired():
-            logger.warning(f"[CONFIG] 账户 {config.account_id} 已过期，跳过加载")
-            continue
+            logger.info(f"[CONFIG] 账户 {config.account_id} 已过期，仅用于前端展示")
 
         manager.add_account(config, http_client, user_agent, account_failure_threshold, rate_limit_cooldown_seconds, global_stats)
 

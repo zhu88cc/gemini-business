@@ -65,7 +65,23 @@ class GeminiAuthHelper:
                     for mail in emails:
                         if mail.get("address") == email and mail.get("source") == self.config.google_mail:
                             metadata = json.loads(mail["metadata"])
-                            return metadata["ai_extract"]["result"]
+                            code = metadata["ai_extract"]["result"]
+                            
+                            # 获取验证码后立即删除邮件，避免后续刷新时误取旧验证码
+                            mail_id = mail.get("id")
+                            if mail_id:
+                                try:
+                                    requests.delete(
+                                        f"{self.config.mail_api}/admin/mails/{mail_id}",
+                                        headers={"x-admin-auth": self.config.admin_key},
+                                        timeout=10,
+                                        verify=False
+                                    )
+                                    logger.info(f"🗑️ 已删除邮件 [{mail_id}]")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ 删除邮件失败 [{mail_id}]: {e}")
+                            
+                            return code
             except:
                 pass
             time.sleep(2)

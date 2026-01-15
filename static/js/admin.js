@@ -164,6 +164,62 @@ let currentConfig = null;
                 }
             }
 
+            async function refreshAccount(accountId) {
+                if (!confirm(`确定刷新账户 ${accountId} 的凭证？\n这将通过重新登录来获取新的凭证。`)) return;
+
+                try {
+                    const response = await fetch(`/${window.ADMIN_PATH}/login/start`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify([accountId])
+                    });
+
+                    const result = await handleApiResponse(response);
+                    alert(`刷新任务已启动！\n任务ID: ${result.task.id}\n请在日志中查看进度。`);
+                    
+                    // 启动轮询任务状态
+                    startLoginPolling(result.task.id);
+                } catch (error) {
+                    console.error('刷新失败:', error);
+                    alert('刷新失败: ' + error.message);
+                }
+            }
+
+            // 轮询登录刷新任务状态
+            let loginPollingInterval = null;
+            function startLoginPolling(taskId) {
+                if (loginPollingInterval) {
+                    clearInterval(loginPollingInterval);
+                }
+                
+                loginPollingInterval = setInterval(async () => {
+                    try {
+                        const response = await fetch(`/${window.ADMIN_PATH}/login/task/${taskId}`);
+                        const result = await response.json();
+                        const task = result.task;
+                        
+                        if (task.status === 'success' || task.status === 'failed') {
+                            clearInterval(loginPollingInterval);
+                            loginPollingInterval = null;
+                            
+                            // 刷新账户列表
+                            await fetch(`/${window.ADMIN_PATH}/accounts/reload`, {
+                                method: 'POST'
+                            });
+                            
+                            // 刷新页面
+                            setTimeout(() => {
+                                refreshPage();
+                            }, 1000);
+                        }
+                    } catch (error) {
+                        console.error('获取刷新进度失败:', error);
+                        clearInterval(loginPollingInterval);
+                        loginPollingInterval = null;
+                    }
+                }, 2000);
+            }
+
             // 批量上传相关函数
             async function handleFileUpload(event) {
                 const files = event.target.files;

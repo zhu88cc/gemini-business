@@ -36,11 +36,14 @@
                 <td data-label="操作">
                     <div style="display: flex; gap: 6px;">
                         {% if account.is_expired %}
+                            <button onclick="refreshAccount('{{ account.account_id }}')" class="btn-sm btn-refresh" title="刷新凭证">刷新</button>
                             <button onclick="deleteAccount('{{ account.account_id }}')" class="btn-sm btn-delete" title="删除">删除</button>
                         {% elif account.is_disabled or account.is_permanently_failed %}
+                            <button onclick="refreshAccount('{{ account.account_id }}')" class="btn-sm btn-refresh" title="刷新凭证">刷新</button>
                             <button onclick="enableAccount('{{ account.account_id }}')" class="btn-sm btn-enable" title="启用">启用</button>
                             <button onclick="deleteAccount('{{ account.account_id }}')" class="btn-sm btn-delete" title="删除">删除</button>
                         {% else %}
+                            <button onclick="refreshAccount('{{ account.account_id }}')" class="btn-sm btn-refresh" title="刷新凭证">刷新</button>
                             <button onclick="disableAccount('{{ account.account_id }}')" class="btn-sm btn-disable" title="禁用">禁用</button>
                             <button onclick="deleteAccount('{{ account.account_id }}')" class="btn-sm btn-delete" title="删除">删除</button>
                         {% endif %}
