@@ -308,12 +308,20 @@ class RegisterService:
             # 从配置读取重试次数
             from core.config import config
             max_retries = config.retry.max_verification_retries if config.retry.verification_retry_enabled else 1
+            retry_interval = config.retry.verification_retry_interval_seconds
+
+            # 代理重试配置（使用代理健康检查配置）
+            proxy_retry_enabled = config.basic.proxy_health_check
+            proxy_retry_count = config.basic.proxy_check_retry_count
 
             # 执行注册流程（带智能重试）
             result = auth_flow.execute(
                 mode="register",
                 email_creator=self._get_email,  # 传入邮箱创建函数
-                max_retries=max_retries  # 从配置读取
+                max_retries=max_retries,  # 验证码重试次数
+                retry_interval=retry_interval,  # 重试间隔
+                proxy_retry_enabled=proxy_retry_enabled,  # 代理错误重试开关
+                proxy_retry_count=proxy_retry_count  # 代理错误重试次数
             )
 
             if not result["success"]:

@@ -267,6 +267,58 @@ def get_chrome_path_and_major():
     logger.info(f"🔍 检测到 Chrome 浏览器: {chrome_path} {isinstance(chrome_path, str)}| 版本: {out}")
     return chrome_path, major, out
 
+# ==================== 代理错误检测 ====================
+
+# 代理相关错误关键词（用于识别代理问题）
+PROXY_ERROR_KEYWORDS = [
+    "ERR_PROXY",
+    "ERR_TUNNEL",
+    "ERR_CONNECTION",
+    "ERR_TIMED_OUT",
+    "ERR_NAME_NOT_RESOLVED",
+    "PROXY_CONNECTION_FAILED",
+    "SOCKS",
+    "proxy",
+    "Connection refused",
+    "Connection reset",
+    "Connection timed out",
+    "net::ERR_",
+]
+
+
+def is_proxy_error(error_message: str) -> bool:
+    """
+    检测是否为代理相关错误
+
+    Args:
+        error_message: 错误信息字符串
+
+    Returns:
+        True 表示是代理错误，False 表示不是
+    """
+    if not error_message:
+        return False
+
+    error_lower = error_message.lower()
+
+    # 检查关键词
+    for keyword in PROXY_ERROR_KEYWORDS:
+        if keyword.lower() in error_lower:
+            return True
+
+    # 特殊情况：空 Message + Stacktrace（Chrome 会话丢失，通常是代理问题）
+    # 格式：Message: Stacktrace: #0 0x...
+    if "message:" in error_lower and "stacktrace:" in error_lower:
+        # 检查 Message: 后面是否直接跟着 Stacktrace（没有具体错误信息）
+        import re
+        pattern = r"message:\s*stacktrace:"
+        if re.search(pattern, error_lower):
+            logger.debug("检测到空 Message 错误，可能是代理问题")
+            return True
+
+    return False
+
+
 # ==================== 代理池管理器 ====================
 
 class ProxyPool:
@@ -945,7 +997,10 @@ class GeminiAuthFlow:
         mode: str,
         email: Optional[str] = None,
         email_creator=None,
-        max_retries: int = 3
+        max_retries: int = 3,
+        retry_interval: int = 5,
+        proxy_retry_enabled: bool = False,
+        proxy_retry_count: int = 3
     ) -> Dict[str, Any]:
         """
         执行统一认证流程
@@ -954,7 +1009,10 @@ class GeminiAuthFlow:
             mode: "register" 或 "login"
             email: 登录模式必填，注册模式会自动创建
             email_creator: 注册模式必填，用于创建临时邮箱的回调函数
-            max_retries: 最大重试次数
+            max_retries: 最大重试次数（验证码重试）
+            retry_interval: 重试间隔（秒）
+            proxy_retry_enabled: 是否启用代理错误重试（从 proxy_health_check 配置读取）
+            proxy_retry_count: 代理错误重试次数（从 proxy_check_retry_count 配置读取）
 
         返回: {
             "success": bool,
@@ -972,18 +1030,26 @@ class GeminiAuthFlow:
         if mode == "register" and not email_creator:
             return {"success": False, "email": None, "config": None, "error": "注册模式必须提供 email_creator"}
 
+        # 会话级排除代理列表（避免重复使用失败的代理）
+        excluded_proxies: set = set()
+        last_result = None
+
+        # 计算实际最大重试次数：取验证码重试和代理重试的较大值
+        actual_max_retries = max(max_retries, proxy_retry_count if proxy_retry_enabled else 1)
+
         # 重试逻辑
-        for attempt in range(max_retries):
+        for attempt in range(actual_max_retries):
             # 注册模式：每次重试创建新邮箱
             if mode == "register":
                 email = email_creator()
                 if not email:
                     return {"success": False, "email": None, "config": None, "error": "无法创建邮箱"}
 
-            logger.info(f"🚀 [{mode.upper()}] 尝试 {attempt + 1}/{max_retries}: {email}")
+            logger.info(f"🚀 [{mode.upper()}] 尝试 {attempt + 1}/{actual_max_retries}: {email}")
 
-            # 执行单次认证
-            result = self._execute_once(mode, email)
+            # 执行单次认证（传入排除列表）
+            result = self._execute_once(mode, email, excluded_proxies=excluded_proxies)
+            last_result = result
 
             # 成功则直接返回
             if result["success"]:
@@ -992,13 +1058,30 @@ class GeminiAuthFlow:
             # 检查错误类型
             error_type = result.get("error_type")
 
-            # 如果是验证码输入框未出现，需要重试
-            if error_type == "pin_input_not_found":
+            # 获取使用的代理（用于排除）
+            used_proxy = result.get("used_proxy")
+            if used_proxy:
+                excluded_proxies.add(used_proxy)
+                logger.info(f"🚫 [{mode.upper()}] 排除失败代理: {ProxyPool._mask_proxy(used_proxy)} (已排除 {len(excluded_proxies)} 个)")
+
+            # 判断是否可以重试
+            can_retry = False
+
+            # 验证码未出现 - 使用验证码重试配置
+            if error_type == "pin_input_not_found" and attempt < max_retries - 1:
                 logger.warning(f"[{mode.upper()}] 邮件没有正常发送，准备重试 ({attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                    continue
-            else:
+                can_retry = True
+
+            # 代理错误 - 使用代理重试配置
+            elif error_type == "proxy_error" and proxy_retry_enabled and attempt < proxy_retry_count - 1:
+                logger.warning(f"[{mode.upper()}] 代理错误，准备切换代理重试 ({attempt + 1}/{proxy_retry_count})")
+                can_retry = True
+
+            if can_retry:
+                logger.info(f"⏳ [{mode.upper()}] 等待 {retry_interval} 秒后重试...")
+                time.sleep(retry_interval)
+                continue
+            elif error_type not in ["pin_input_not_found", "proxy_error"]:
                 # 其他错误不重试，直接返回
                 logger.error(f"❌ [{mode.upper()}] 认证失败: {result.get('error')}")
                 return result
@@ -1008,21 +1091,31 @@ class GeminiAuthFlow:
             "success": False,
             "email": email,
             "config": None,
-            "error": f"重试 {max_retries} 次后仍然失败"
+            "error": f"重试 {actual_max_retries} 次后仍然失败",
+            "last_error_type": last_result.get("error_type") if last_result else None
         }
 
-    def _execute_once(self, mode: str, email: str) -> Dict[str, Any]:
+    def _execute_once(self, mode: str, email: str, excluded_proxies: set = None) -> Dict[str, Any]:
         """
         执行单次认证流程（不含重试）
+
+        Args:
+            mode: "register" 或 "login"
+            email: 邮箱地址
+            excluded_proxies: 需要排除的代理集合（会话级）
 
         返回: {
             "success": bool,
             "email": str,
             "config": dict|None,
             "error": str|None,
-            "error_type": str|None
+            "error_type": str|None,
+            "used_proxy": str|None  # 使用的代理（用于排除）
         }
         """
+        if excluded_proxies is None:
+            excluded_proxies = set()
+
         driver = None
         selected_proxy = None  # 记录使用的代理
         proxy_pool = None  # 记录代理池实例
@@ -1041,7 +1134,8 @@ class GeminiAuthFlow:
                 "email": email,
                 "config": None,
                 "error": f"Selenium 未安装: {e}",
-                "error_type": "import_error"
+                "error_type": "import_error",
+                "used_proxy": None
             }
 
         try:
@@ -1056,30 +1150,43 @@ class GeminiAuthFlow:
                     health_check=app_config.basic.proxy_health_check,
                     timeout=app_config.basic.proxy_timeout
                 )
-                # 如果启用了健康检查，使用带检测的获取方法
+                # 如果启用了健康检查，使用带检测的获取方法（传入排除列表）
                 if app_config.basic.proxy_health_check:
                     selected_proxy = proxy_pool.get_proxy_with_health_check(
                         max_retries=app_config.basic.proxy_check_retry_count,
-                        fail_strategy=app_config.basic.proxy_check_fail_strategy
+                        fail_strategy=app_config.basic.proxy_check_fail_strategy,
+                        excluded=excluded_proxies  # 传入会话级排除列表
                     )
                 else:
-                    selected_proxy = proxy_pool.get_proxy()
+                    # 非健康检查模式也要排除失败的代理
+                    available_proxies = [p for p in app_config.basic.proxy_pool if p not in excluded_proxies]
+                    if available_proxies:
+                        selected_proxy = random.choice(available_proxies)
+                        logger.info(f"🎲 随机选择代理（排除 {len(excluded_proxies)} 个）: {ProxyPool._mask_proxy(selected_proxy)}")
+                    else:
+                        logger.warning(f"⚠️ 所有代理都被排除，使用直连")
+                        selected_proxy = None
             # 如果代理池为空，回退到单个代理
             elif app_config.basic.proxy:
-                selected_proxy = app_config.basic.proxy
-                # 单个代理也支持健康检查
-                if app_config.basic.proxy_health_check:
-                    temp_pool = ProxyPool(
-                        proxy_list=[selected_proxy],
-                        timeout=app_config.basic.proxy_timeout
-                    )
-                    if not temp_pool.check_proxy_health(selected_proxy):
-                        logger.warning(f"⚠️ 单个代理不可用，降级为直连")
-                        selected_proxy = None
-                    else:
-                        logger.info(f"✅ 单个代理可用: {ProxyPool._mask_proxy(selected_proxy)}")
+                # 单个代理如果在排除列表中，直接跳过
+                if app_config.basic.proxy in excluded_proxies:
+                    logger.warning(f"⚠️ 单个代理已被排除，使用直连")
+                    selected_proxy = None
                 else:
-                    logger.info(f"🌐 使用单个代理: {ProxyPool._mask_proxy(selected_proxy)}")
+                    selected_proxy = app_config.basic.proxy
+                    # 单个代理也支持健康检查
+                    if app_config.basic.proxy_health_check:
+                        temp_pool = ProxyPool(
+                            proxy_list=[selected_proxy],
+                            timeout=app_config.basic.proxy_timeout
+                        )
+                        if not temp_pool.check_proxy_health(selected_proxy):
+                            logger.warning(f"⚠️ 单个代理不可用，降级为直连")
+                            selected_proxy = None
+                        else:
+                            logger.info(f"✅ 单个代理可用: {ProxyPool._mask_proxy(selected_proxy)}")
+                    else:
+                        logger.info(f"🌐 使用单个代理: {ProxyPool._mask_proxy(selected_proxy)}")
 
             chrome_bin, major, out = get_chrome_path_and_major()
 
@@ -1134,7 +1241,8 @@ class GeminiAuthFlow:
                     "email": email,
                     "config": None,
                     "error": verify_result["error"],
-                    "error_type": verify_result.get("error_type")
+                    "error_type": verify_result.get("error_type"),
+                    "used_proxy": selected_proxy
                 }
 
             # 4. 注册模式：输入姓名
@@ -1176,7 +1284,8 @@ class GeminiAuthFlow:
                         "email": email,
                         "config": None,
                         "error": "未找到姓名输入框",
-                        "error_type": "name_input_not_found"
+                        "error_type": "name_input_not_found",
+                        "used_proxy": selected_proxy
                     }
 
             # 5. 等待进入工作台
@@ -1190,7 +1299,8 @@ class GeminiAuthFlow:
                     "email": email,
                     "config": None,
                     "error": "未跳转到工作台",
-                    "error_type": "workspace_timeout"
+                    "error_type": "workspace_timeout",
+                    "used_proxy": selected_proxy
                 }
 
             # 6. 提取配置（带重试机制处理 tab crashed）
@@ -1205,7 +1315,8 @@ class GeminiAuthFlow:
                     "email": email,
                     "config": None,
                     "error": extract_result["error"],
-                    "error_type": "extract_config_failed"
+                    "error_type": "extract_config_failed",
+                    "used_proxy": selected_proxy
                 }
 
             config_data = extract_result["config"]
@@ -1220,22 +1331,30 @@ class GeminiAuthFlow:
                 "email": email,
                 "config": config_data,
                 "error": None,
-                "error_type": None
+                "error_type": None,
+                "used_proxy": selected_proxy
             }
 
         except Exception as e:
-            logger.error(f"❌ [{mode.upper()}] 认证异常 [{email}]: {e}")
+            error_msg = str(e)
+            logger.error(f"❌ [{mode.upper()}] 认证异常 [{email}]: {error_msg}")
 
             # 代理池：标记失败
             if proxy_pool and selected_proxy:
                 proxy_pool.mark_proxy_failed(selected_proxy)
 
+            # 检测是否为代理错误
+            error_type = "proxy_error" if is_proxy_error(error_msg) else "unknown"
+            if error_type == "proxy_error":
+                logger.warning(f"🔄 [{mode.upper()}] 检测到代理错误，可以尝试切换代理重试")
+
             return {
                 "success": False,
                 "email": email,
                 "config": None,
-                "error": str(e),
-                "error_type": "unknown"
+                "error": error_msg,
+                "error_type": error_type,
+                "used_proxy": selected_proxy
             }
         finally:
             if driver:
