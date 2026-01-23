@@ -817,8 +817,13 @@ class GeminiAuthHelper:
             return {"success": True, "error": None, "error_type": None}
 
         except Exception as e:
-            logger.error(f"❌ 邮箱验证流程异常: {e}")
-            return {"success": False, "error": str(e), "error_type": "unknown"}
+            error_msg = str(e)
+            logger.error(f"❌ 邮箱验证流程异常: {error_msg}")
+            # 检测是否为代理错误
+            error_type = "proxy_error" if is_proxy_error(error_msg) else "unknown"
+            if error_type == "proxy_error":
+                logger.warning(f"🔄 邮箱验证检测到代理错误，可以尝试切换代理重试")
+            return {"success": False, "error": error_msg, "error_type": error_type}
 
     def extract_config_from_workspace(self, driver) -> Dict[str, Any]:
         """
@@ -1058,12 +1063,6 @@ class GeminiAuthFlow:
             # 检查错误类型
             error_type = result.get("error_type")
 
-            # 获取使用的代理（用于排除）
-            used_proxy = result.get("used_proxy")
-            if used_proxy:
-                excluded_proxies.add(used_proxy)
-                logger.info(f"🚫 [{mode.upper()}] 排除失败代理: {ProxyPool._mask_proxy(used_proxy)} (已排除 {len(excluded_proxies)} 个)")
-
             # 判断是否可以重试
             can_retry = False
 
@@ -1074,6 +1073,12 @@ class GeminiAuthFlow:
 
             # 代理错误 - 使用代理重试配置
             elif error_type == "proxy_error" and proxy_retry_enabled and attempt < proxy_retry_count - 1:
+                # 获取使用的代理（用于排除）
+                used_proxy = result.get("used_proxy")
+                if used_proxy:
+                    excluded_proxies.add(used_proxy)
+                    logger.info(
+                        f"🚫 [{mode.upper()}] 排除失败代理: {ProxyPool._mask_proxy(used_proxy)} (已排除 {len(excluded_proxies)} 个)")
                 logger.warning(f"[{mode.upper()}] 代理错误，准备切换代理重试 ({attempt + 1}/{proxy_retry_count})")
                 can_retry = True
 
