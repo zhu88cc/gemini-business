@@ -29,12 +29,21 @@ class BasicConfig(BaseModel):
     """基础配置"""
     api_key: str = Field(default="", description="API访问密钥（留空则公开访问）")
     base_url: str = Field(default="", description="服务器URL（留空则自动检测）")
-    proxy: str = Field(default="", description="代理地址")
+    proxy: str = Field(default="", description="代理地址（单个代理，优先级低于代理池）")
     google_mail: str = Field(default="noreply-googlecloud@google.com", description="谷歌发件邮箱地址")
     mail_api: str = Field(default="", description="临时邮箱API地址")
     mail_admin_key: str = Field(default="", description="临时邮箱管理员密钥")
     email_domain: list = Field(default=[], description="临时邮箱域名")
     register_number: int = Field(default=5, ge=1, le=100, description="注册临时邮箱数量")
+
+    # ========== 代理池配置（老王特制，规避 IP 审查） ==========
+    proxy_pool: List[str] = Field(default=[], description="代理池列表（支持http/https/socks5）")
+    proxy_strategy: str = Field(default="random", description="代理选择策略：random(随机), round_robin(轮询), failover(故障转移)")
+    proxy_health_check: bool = Field(default=False, description="是否启用代理健康检查")
+    proxy_timeout: int = Field(default=10, ge=3, le=60, description="代理连接超时（秒）")
+    # 代理检查失败策略配置
+    proxy_check_fail_strategy: str = Field(default="switch_then_direct", description="代理检查失败策略：switch_then_direct(切换后直连), direct(直接直连)")
+    proxy_check_retry_count: int = Field(default=3, ge=1, le=10, description="代理检查失败时切换代理的次数")
 
 
 
@@ -85,7 +94,6 @@ class SecurityConfig(BaseModel):
     path_prefix: str = Field(default="", description="路径前缀（隐藏管理端点）")
     session_secret_key: str = Field(..., description="Session密钥")
     login_url: str = Field(default="https://auth.business.gemini.google/login?continueUrl=https:%2F%2Fbusiness.gemini.google%2F&wiffid=CAoSJDIwNTlhYzBjLTVlMmMtNGUxZS1hY2JkLThmOGY2ZDE0ODM1Mg", description="google business 登录链接")
-
 
 class AppConfig(BaseModel):
     """应用配置（统一管理）"""
@@ -157,6 +165,28 @@ class ConfigManager:
             else:
                 email_domain_value = []
 
+        # 处理 proxy_pool（支持多种格式）
+        proxy_pool_value = basic_data.get("proxy_pool")
+        if not proxy_pool_value:  # YAML 中不存在或为空
+            env_proxies = os.getenv("PROXY_POOL", "")
+            if env_proxies:
+                # 尝试解析 JSON 数组格式
+                if env_proxies.strip().startswith('['):
+                    try:
+                        import json
+                        proxy_pool_value = json.loads(env_proxies)
+                    except:
+                        proxy_pool_value = []
+                else:
+                    # 逗号/分号/换行符分隔格式
+                    import re
+                    proxy_pool_value = [
+                        p.strip() for p in re.split(r'[,;\n]', env_proxies)
+                        if p.strip()
+                    ]
+            else:
+                proxy_pool_value = []
+
         basic_config = BasicConfig(
             api_key=basic_data.get("api_key") or os.getenv("API_KEY", ""),
             base_url=basic_data.get("base_url") or os.getenv("BASE_URL", ""),
@@ -165,7 +195,15 @@ class ConfigManager:
             mail_api=basic_data.get("mail_api") or os.getenv("MAIL_API", ""),
             mail_admin_key=basic_data.get("mail_admin_key") or os.getenv("MAIL_ADMIN_KEY", ""),
             email_domain=email_domain_value,
-            register_number=basic_data.get("register_number") or int(os.getenv("REGISTER_NUMBER", 5))
+            register_number=basic_data.get("register_number") or int(os.getenv("REGISTER_NUMBER", 5)),
+            # 代理池配置
+            proxy_pool=proxy_pool_value,
+            proxy_strategy=basic_data.get("proxy_strategy") or os.getenv("PROXY_STRATEGY", "random"),
+            proxy_health_check=basic_data.get("proxy_health_check", False) if "proxy_health_check" in basic_data else os.getenv("PROXY_HEALTH_CHECK", "").lower() in ["1", "true", "yes"],
+            proxy_timeout=basic_data.get("proxy_timeout") or int(os.getenv("PROXY_TIMEOUT", 10)),
+            # 代理检查失败策略
+            proxy_check_fail_strategy=basic_data.get("proxy_check_fail_strategy") or os.getenv("PROXY_CHECK_FAIL_STRATEGY", "switch_then_direct"),
+            proxy_check_retry_count=basic_data.get("proxy_check_retry_count") or int(os.getenv("PROXY_CHECK_RETRY_COUNT", 3))
         )
 
         # 4. 加载其他配置（从 YAML）

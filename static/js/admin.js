@@ -318,6 +318,38 @@ document.getElementById('jsonModal').addEventListener('click', function (e) {
 });
 
 // ========== 系统设置相关函数 ==========
+
+// 代理健康检查选项的联动显示控制
+function updateProxyHealthCheckOptions() {
+    const healthCheckEnabled = document.getElementById('setting-proxy-health-check').checked;
+    const optionsDiv = document.getElementById('proxy-health-check-options');
+    const strategySelect = document.getElementById('setting-proxy-check-fail-strategy');
+    const retryCountItem = document.getElementById('proxy-retry-count-item');
+
+    // 健康检查选项区域显示/隐藏
+    if (optionsDiv) {
+        optionsDiv.style.display = healthCheckEnabled ? 'block' : 'none';
+    }
+
+    // 切换次数输入只在"切换后直连"策略时显示
+    if (retryCountItem && strategySelect) {
+        retryCountItem.style.display = strategySelect.value === 'switch_then_direct' ? 'block' : 'none';
+    }
+}
+
+// 初始化事件监听器（页面加载后执行）
+function initProxyHealthCheckListeners() {
+    const healthCheckbox = document.getElementById('setting-proxy-health-check');
+    const strategySelect = document.getElementById('setting-proxy-check-fail-strategy');
+
+    if (healthCheckbox) {
+        healthCheckbox.addEventListener('change', updateProxyHealthCheckOptions);
+    }
+    if (strategySelect) {
+        strategySelect.addEventListener('change', updateProxyHealthCheckOptions);
+    }
+}
+
 async function loadSettings() {
     try {
         const response = await fetch(`/${window.ADMIN_PATH}/settings`);
@@ -327,6 +359,27 @@ async function loadSettings() {
         document.getElementById('setting-api-key').value = settings.basic?.api_key || '';
         document.getElementById('setting-base-url').value = settings.basic?.base_url || '';
         document.getElementById('setting-proxy').value = settings.basic?.proxy || '';
+
+        // ========== 代理池配置（老王特制） ==========
+        // 将代理池数组转换为每行一个代理的文本格式
+        const proxyPoolArray = settings.basic?.proxy_pool || [];
+        document.getElementById('setting-proxy-pool').value = proxyPoolArray.join('\n');
+
+        // 代理选择策略
+        document.getElementById('setting-proxy-strategy').value = settings.basic?.proxy_strategy || 'random';
+
+        // 代理健康检查
+        document.getElementById('setting-proxy-health-check').checked = settings.basic?.proxy_health_check ?? false;
+
+        // 代理检查失败策略和切换次数
+        document.getElementById('setting-proxy-check-fail-strategy').value = settings.basic?.proxy_check_fail_strategy || 'switch_then_direct';
+        document.getElementById('setting-proxy-check-retry-count').value = settings.basic?.proxy_check_retry_count || 3;
+
+        // 代理超时
+        document.getElementById('setting-proxy-timeout').value = settings.basic?.proxy_timeout || 10;
+
+        // 初始化健康检查选项的显示状态
+        updateProxyHealthCheckOptions();
 
         // 临时邮箱配置
         document.getElementById('setting-mail-api').value = settings.basic?.mail_api || '';
@@ -377,11 +430,29 @@ async function saveSettings() {
             supportedModels.push(cb.value);
         });
 
+        // ========== 处理代理池输入（老王特制） ==========
+        // 从 textarea 读取代理列表（每行一个），过滤空行和空格
+        const proxyPoolText = document.getElementById('setting-proxy-pool').value;
+        const proxyPoolArray = proxyPoolText
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0);
+
         const settings = {
             basic: {
                 api_key: document.getElementById('setting-api-key').value,
                 base_url: document.getElementById('setting-base-url').value,
                 proxy: document.getElementById('setting-proxy').value,
+
+                // 代理池配置
+                proxy_pool: proxyPoolArray,
+                proxy_strategy: document.getElementById('setting-proxy-strategy').value,
+                proxy_health_check: document.getElementById('setting-proxy-health-check').checked,
+                proxy_timeout: parseInt(document.getElementById('setting-proxy-timeout').value) || 10,
+                // 代理检查失败策略
+                proxy_check_fail_strategy: document.getElementById('setting-proxy-check-fail-strategy').value,
+                proxy_check_retry_count: parseInt(document.getElementById('setting-proxy-check-retry-count').value) || 3,
+
                 mail_api: document.getElementById('setting-mail-api').value,
                 mail_admin_key: document.getElementById('setting-mail-admin-key').value,
                 google_mail: document.getElementById('setting-google-mail').value,
@@ -437,6 +508,9 @@ async function saveSettings() {
 // 页面加载时自动加载设置并刷新账户
 document.addEventListener('DOMContentLoaded', async function () {
     loadSettings();
+
+    // 初始化代理健康检查的联动显示
+    initProxyHealthCheckListeners();
 
     // 页面加载时立即同步加载最新账户数据
     try {

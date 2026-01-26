@@ -1,21 +1,26 @@
 services:
   gemini-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/linlee996/gemini-business:latest
+    container_name: gemini-business
+    shm_size: "2gb"
+    mem_limit: 2g
+    cpus: 2.0
+    ulimits:
+      nofile: 65535
+      nproc: 4096
+
     ports:
       - "7860:7860"
     volumes:
       - ./data:/app/data
-    env_file:
-      - .env
+    # 可选通过 env_file 加载环境变量
+    # env_file:
+    #  - .env
+    environment:
+      - TZ=Asia/Shanghai
+      - ADMIN_KEY=admin
+      - LOGIN_URL=https://auth.business.gemini.google/login?continueUrl=https:%2F%2Fbusiness.gemini.google%2F&wiffid=CAoSJDIwNTlhYzBjLTVlMmMtNGUxZS1hY2JkLThmOGY2ZDE0ODM1Mg
     restart: unless-stopped
-    # 限制资源使用（因为包含 Chrome）
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 2G
 
 networks:
   default:

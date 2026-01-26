@@ -8,6 +8,7 @@ from pathlib import Path
 
 from core.config import config_manager, config
 from core.account import format_account_expiration
+from core.model_config import get_available_models, BASE_MODELS
 
 
 def get_base_url_from_request(request) -> str:
@@ -144,6 +145,9 @@ def prepare_admin_template_data(
         "api_path_segment": api_path_segment,
         "multi_account_mgr": multi_account_mgr,
         "static_version": static_version,
+        # 模型列表（动态生成）
+        "available_models": ["gemini-auto"] + get_available_models(),
+        "base_models": ["gemini-auto"] + BASE_MODELS,  # 基础模型列表（用于图片生成配置）
         # 配置变量（用于 JavaScript）
         "main": {
             "PATH_PREFIX": path_prefix,

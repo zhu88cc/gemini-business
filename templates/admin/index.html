@@ -87,16 +87,10 @@
                 <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(0,0,0,0.06);">
                     <div style="font-size: 11px; color: #6b6b6b; margin-bottom: 6px;">支持的模型</div>
                     <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        {% for model in available_models %}
                         <span
-                            style="background: #f0f0f2; color: #1d1d1f; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;">gemini-auto</span>
-                        <span
-                            style="background: #f0f0f2; color: #1d1d1f; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;">gemini-2.5-flash</span>
-                        <span
-                            style="background: #f0f0f2; color: #1d1d1f; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;">gemini-2.5-pro</span>
-                        <span
-                            style="background: #f0f0f2; color: #1d1d1f; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;">gemini-3-flash-preview</span>
-                        <span
-                            style="background: #f0f0f2; color: #1d1d1f; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;">gemini-3-pro-preview</span>
+                            style="background: #f0f0f2; color: #1d1d1f; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace;">{{ model }}</span>
+                        {% endfor %}
                     </div>
                     <div style="margin-top: 8px; font-size: 11px; color: #86868b;">
                         📸 图片生成可在"系统设置"自定义配置
@@ -396,8 +390,94 @@
                                 <input type="text" id="setting-base-url" placeholder="留空则自动检测" />
                             </div>
                             <div class="setting-item">
-                                <label>代理地址</label>
+                                <label>代理地址（单个代理）</label>
                                 <input type="text" id="setting-proxy" placeholder="如 http://127.0.0.1:7890" />
+                                <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
+                                    ⚠️ 单个代理优先级低于代理池，建议使用下方代理池配置
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 🌐 代理池配置（老王特制，规避 IP 审查） -->
+                    <div class="card">
+                        <h3>🌐 代理池配置（IP 轮换，规避审查）</h3>
+                        <div style="margin-top: 12px;">
+                            <div class="setting-item">
+                                <label>代理池列表（每行一个）</label>
+                                <textarea id="setting-proxy-pool" rows="6"
+                                    placeholder="每行一个代理地址，支持 http/https/socks5：&#10;http://user:pass@proxy1.com:8080&#10;socks5://proxy2.com:1080&#10;http://proxy3.com:3128&#10;https://user:pass@proxy4.com:8443"
+                                    style="width: 100%; padding: 8px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 12px; font-family: 'SF Mono', SFMono-Regular, Consolas, monospace; resize: vertical;"></textarea>
+                                <div style="margin-top: 6px; font-size: 11px; color: #6b6b6b;">
+                                    💡 支持 HTTP、HTTPS、SOCKS5 代理<br>
+                                    📋 格式：<code
+                                        style="background: rgba(0,0,0,0.05); padding: 2px 4px; border-radius: 3px;">protocol://user:pass@host:port</code><br>
+                                    🔁 每次注册自动切换代理，规避单一 IP 检测
+                                </div>
+                            </div>
+
+                            <div class="setting-item">
+                                <label>代理选择策略</label>
+                                <select id="setting-proxy-strategy"
+                                    style="width: 100%; padding: 8px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 13px;">
+                                    <option value="random">🎲 随机选择（推荐）- 最难被检测</option>
+                                    <option value="round_robin">🔄 轮询选择 - 公平分配</option>
+                                    <option value="failover">✅ 故障转移 - 自动跳过失败代理</option>
+                                </select>
+                                <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
+                                    建议使用"随机选择"，最大程度规避检测
+                                </div>
+                            </div>
+
+                            <div class="setting-item">
+                                <label style="display: flex; align-items: center; gap: 8px;">
+                                    <input type="checkbox" id="setting-proxy-health-check" style="width: auto;" />
+                                    启用代理健康检查
+                                </label>
+                                <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
+                                    启用后会在启动前测试代理可用性，不可用则自动处理
+                                </div>
+                            </div>
+
+                            <div id="proxy-health-check-options"
+                                style="margin-left: 24px; padding-left: 12px; border-left: 2px solid #e5e5ea;">
+                                <div class="setting-item">
+                                    <label>检查失败策略</label>
+                                    <select id="setting-proxy-check-fail-strategy"
+                                        style="width: 100%; padding: 8px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 13px;">
+                                        <option value="switch_then_direct">🔄 切换后直连 - 尝试N个代理都失败后直连</option>
+                                        <option value="direct">⚡ 直接直连 - 第一个代理失败就直连</option>
+                                    </select>
+                                </div>
+
+                                <div class="setting-item" id="proxy-retry-count-item">
+                                    <label>代理切换次数</label>
+                                    <input type="number" id="setting-proxy-check-retry-count" min="1" max="10"
+                                        placeholder="3" />
+                                    <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
+                                        最多尝试几个代理（仅"切换后直连"策略生效）
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="setting-item">
+                                <label>代理连接超时（秒）</label>
+                                <input type="number" id="setting-proxy-timeout" min="3" max="60" placeholder="10" />
+                                <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
+                                    建议设置 5-15 秒，过短可能导致超时
+                                </div>
+                            </div>
+
+                            <div
+                                style="margin-top: 12px; padding: 12px; background: rgba(0, 113, 227, 0.05); border-radius: 6px; border-left: 3px solid #0071e3;">
+                                <div style="font-size: 11px; color: #1d1d1f; line-height: 1.6;">
+                                    <strong style="color: #0071e3;">💡 代理池使用说明：</strong><br>
+                                    1️⃣ 每次注册会自动从代理池中选择代理<br>
+                                    2️⃣ 启用健康检查后，会先测试代理可用性<br>
+                                    3️⃣ 不可用的代理会自动跳过或降级为直连<br>
+                                    4️⃣ 代理的不可用状态仅当次生效，下次仍会重新检测<br>
+                                    5️⃣ 建议配置 10+ 个代理，效果最佳
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -430,69 +510,6 @@
                             <div class="setting-item">
                                 <label>默认注册数量</label>
                                 <input type="number" id="setting-register-number" min="1" max="100" placeholder="5" />
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 自动注册配置 -->
-                    <div class="card">
-                        <h3>🕒 自动注册配置</h3>
-                        <div style="margin-top: 12px;">
-                            <div class="setting-item">
-                                <label style="display: flex; align-items: center; gap: 8px;">
-                                    <input type="checkbox" id="setting-auto-register-enabled" style="width: auto;" />
-                                    启用自动注册
-                                </label>
-                            </div>
-                            <div class="setting-item">
-                                <label>Cron 表达式（5段）</label>
-                                <input type="text" id="setting-auto-register-cron" placeholder="如 0 3 * * *" />
-                                <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
-                                    分钟 小时 日 月 周（0=周日，1=周一）
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 图片生成配置 -->
-                    <div class="card">
-                        <h3>📸 图片生成配置</h3>
-                        <div style="margin-top: 12px;">
-                            <div class="setting-item">
-                                <label style="display: flex; align-items: center; gap: 8px;">
-                                    <input type="checkbox" id="setting-image-enabled" style="width: auto;" />
-                                    启用图片生成
-                                </label>
-                            </div>
-                            <div class="setting-item">
-                                <label>支持的模型</label>
-                                <div id="setting-image-models"
-                                    style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;">
-                                    <label
-                                        style="display: flex; align-items: center; gap: 6px; font-weight: normal; font-size: 12px;">
-                                        <input type="checkbox" value="gemini-3-pro-preview" style="width: auto;" />
-                                        gemini-3-pro-preview
-                                    </label>
-                                    <label
-                                        style="display: flex; align-items: center; gap: 6px; font-weight: normal; font-size: 12px;">
-                                        <input type="checkbox" value="gemini-2.5-pro" style="width: auto;" />
-                                        gemini-2.5-pro
-                                    </label>
-                                    <label
-                                        style="display: flex; align-items: center; gap: 6px; font-weight: normal; font-size: 12px;">
-                                        <input type="checkbox" value="gemini-2.5-flash" style="width: auto;" />
-                                        gemini-2.5-flash
-                                    </label>
-                                    <label
-                                        style="display: flex; align-items: center; gap: 6px; font-weight: normal; font-size: 12px;">
-                                        <input type="checkbox" value="gemini-3-flash-preview" style="width: auto;" />
-                                        gemini-3-flash-preview
-                                    </label>
-                                    <label
-                                        style="display: flex; align-items: center; gap: 6px; font-weight: normal; font-size: 12px;">
-                                        <input type="checkbox" value="gemini-auto" style="width: auto;" /> gemini-auto
-                                    </label>
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -547,6 +564,52 @@
                                 <div class="setting-item">
                                     <label>验证码重试间隔（秒）</label>
                                     <input type="number" id="setting-verification-interval" min="3" max="60" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 自动注册配置 -->
+                    <div class="card">
+                        <h3>🕒 自动注册配置</h3>
+                        <div style="margin-top: 12px;">
+                            <div class="setting-item">
+                                <label style="display: flex; align-items: center; gap: 8px;">
+                                    <input type="checkbox" id="setting-auto-register-enabled" style="width: auto;" />
+                                    启用自动注册
+                                </label>
+                            </div>
+                            <div class="setting-item">
+                                <label>Cron 表达式（5段）</label>
+                                <input type="text" id="setting-auto-register-cron" placeholder="如 0 3 * * *" />
+                                <div style="margin-top: 4px; font-size: 11px; color: #6b6b6b;">
+                                    分钟 小时 日 月 周（0=周日，1=周一）
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 图片生成配置 -->
+                    <div class="card">
+                        <h3>📸 图片生成配置</h3>
+                        <div style="margin-top: 12px;">
+                            <div class="setting-item">
+                                <label style="display: flex; align-items: center; gap: 8px;">
+                                    <input type="checkbox" id="setting-image-enabled" style="width: auto;" />
+                                    启用图片生成
+                                </label>
+                            </div>
+                            <div class="setting-item">
+                                <label>支持的模型</label>
+                                <div id="setting-image-models"
+                                    style="display: flex; flex-direction: column; gap: 6px; margin-top: 6px;">
+                                    {% for model in base_models %}
+                                    <label
+                                        style="display: flex; align-items: center; gap: 6px; font-weight: normal; font-size: 12px;">
+                                        <input type="checkbox" value="{{ model }}" style="width: auto;" />
+                                        {{ model }}
+                                    </label>
+                                    {% endfor %}
                                 </div>
                             </div>
                         </div>

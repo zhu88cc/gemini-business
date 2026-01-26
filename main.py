@@ -65,6 +65,22 @@ from core.account import (
     delete_account as _delete_account,
     update_account_disabled_status as _update_account_disabled_status
 )
+# 导入模型配置模块（抗截断功能）
+from core.model_config import (
+    get_base_model_name,
+    get_available_models,
+    get_model_mapping,
+    parse_model_features,
+    is_anti_truncation_model,
+)
+from util.anti_truncation import (
+    inject_anti_truncation_instruction,
+    clean_done_marker_from_text,
+    build_continuation_text,
+    check_done_marker,
+    AntiTruncationCollector,
+    MAX_CONTINUATION_ATTEMPTS,
+)
 
 # ---------- 日志配置（必须在导入其他模块之前）----------
 # 艹，logger 必须先定义好再导入其他模块，不然那些SB模块里的 logger.info 会报错！
@@ -187,13 +203,8 @@ RATE_LIMIT_COOLDOWN_SECONDS = config.retry.rate_limit_cooldown_seconds
 SESSION_CACHE_TTL_SECONDS = config.retry.session_cache_ttl_seconds
 
 # ---------- 模型映射配置 ----------
-MODEL_MAPPING = {
-    "gemini-auto": None,
-    "gemini-2.5-flash": "gemini-2.5-flash",
-    "gemini-2.5-pro": "gemini-2.5-pro",
-    "gemini-3-flash-preview": "gemini-3-flash-preview",
-    "gemini-3-pro-preview": "gemini-3-pro-preview"
-}
+# 使用动态生成的模型映射（支持 nothinking/maxthinking/抗截断等模型变体）
+MODEL_MAPPING = get_model_mapping()
 
 # ---------- HTTP 客户端 ----------
 http_client = httpx.AsyncClient(
@@ -844,6 +855,12 @@ async def admin_get_settings(request: Request):
             "api_key": config.basic.api_key,
             "base_url": config.basic.base_url,
             "proxy": config.basic.proxy,
+            # ========== 代理池配置（老王特制） ==========
+            "proxy_pool": config.basic.proxy_pool,
+            "proxy_strategy": config.basic.proxy_strategy,
+            "proxy_health_check": config.basic.proxy_health_check,
+            "proxy_timeout": config.basic.proxy_timeout,
+            # ==========================================
             "mail_api": config.basic.mail_api,
             "mail_admin_key": config.basic.mail_admin_key,
             "google_mail": config.basic.google_mail,
@@ -1692,7 +1709,28 @@ def parse_images_from_response(data_list: list) -> tuple[list, str]:
 
 
 async def stream_chat_generator(session: str, text_content: str, file_ids: List[str], model_name: str, chat_id: str, created_time: int, account_manager: AccountManager, is_stream: bool = True, request_id: str = "", request: Request = None):
+    """
+    流式聊天生成器
+
+    支持抗截断功能：
+    - 抗截断模式会注入 [done] 标记指令
+    - 自动检测截断并发送续传请求
+    - 最多续传 MAX_CONTINUATION_ATTEMPTS 次
+    """
     start_time = time.time()
+
+    # 解析模型特性
+    model_features = parse_model_features(model_name)
+    base_model = model_features["base_model"]
+    use_anti_truncation = model_features["is_anti_truncation"]
+
+    # 保存原始请求文本（用于续传）
+    original_text = text_content
+
+    # 如果是抗截断模型，注入抗截断指令
+    if use_anti_truncation:
+        text_content = inject_anti_truncation_instruction(text_content)
+        logger.info(f"[API] [{account_manager.config.account_id}] [req_{request_id}] 启用抗截断模式")
 
     # 记录发送给API的内容
     text_preview = text_content[:500] + "...(已截断)" if len(text_content) > 500 else text_content
@@ -1703,103 +1741,171 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
     jwt = await account_manager.get_jwt(request_id)
     headers = get_common_headers(jwt, USER_AGENT)
 
-    # 构建 toolsSpec（根据配置决定是否启用图片生成）
+    # 构建 toolsSpec（默认启用搜索，根据配置决定是否启用图片生成）
     tools_spec = {
         "webGroundingSpec": {},
         "toolRegistry": "default_tool_registry",
     }
-    # 只在启用且模型支持时添加图片生成
-    if IMAGE_GENERATION_ENABLED and model_name in IMAGE_GENERATION_MODELS:
+    # 只在启用且基础模型支持时添加图片生成
+    if IMAGE_GENERATION_ENABLED and base_model in IMAGE_GENERATION_MODELS:
         tools_spec["imageGenerationSpec"] = {}
         tools_spec["videoGenerationSpec"] = {}
 
-    body = {
-        "configId": account_manager.config.config_id,
-        "additionalParams": {"token": "-"},
-        "streamAssistRequest": {
-            "session": session,
-            "query": {"parts": [{"text": text_content}]},
-            "filter": "",
-            "fileIds": file_ids, # 注入文件 ID
-            "answerGenerationMode": "NORMAL",
-            "toolsSpec": tools_spec,
-            "languageCode": "zh-CN",
-            "userMetadata": {"timeZone": "Asia/Shanghai"},
-            "assistSkippingMode": "REQUEST_ASSIST"
-        }
-    }
-
-    target_model_id = MODEL_MAPPING.get(model_name)
-    if target_model_id:
-        body["streamAssistRequest"]["assistGenerationConfig"] = {
-            "modelId": target_model_id
-        }
+    # 初始化抗截断收集器
+    anti_truncation_collector = AntiTruncationCollector() if use_anti_truncation else None
+    current_text = text_content  # 当前请求的文本（可能是续传文本）
 
     if is_stream:
         chunk = create_chunk(chat_id, created_time, model_name, {"role": "assistant"}, None)
         yield f"data: {chunk}\n\n"
 
-    # 使用流式请求
+    # 使用流式请求（支持续传的 while 循环）
     json_objects = []  # 收集所有响应对象用于图片解析
     file_ids_info = None  # 保存图片信息
+    current_attempt = 0
 
-    async with http_client.stream(
-        "POST",
-        "https://biz-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
-        headers=headers,
-        json=body,
-    ) as r:
-        if r.status_code != 200:
-            error_text = await r.aread()
-            raise HTTPException(status_code=r.status_code, detail=f"Upstream Error {error_text.decode()}")
+    while True:
+        current_attempt += 1
 
-        # 使用异步解析器处理 JSON 数组流
+        if use_anti_truncation:
+            logger.info(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 尝试 {current_attempt}/{MAX_CONTINUATION_ATTEMPTS}")
+
+        # 构建请求体
+        body = {
+            "configId": account_manager.config.config_id,
+            "additionalParams": {"token": "-"},
+            "streamAssistRequest": {
+                "session": session,
+                "query": {"parts": [{"text": current_text}]},
+                "filter": "",
+                "fileIds": file_ids if current_attempt == 1 else [],  # 只在第一次请求时带文件
+                "answerGenerationMode": "NORMAL",
+                "toolsSpec": tools_spec,
+                "languageCode": "zh-CN",
+                "userMetadata": {"timeZone": "Asia/Shanghai"},
+                "assistSkippingMode": "REQUEST_ASSIST"
+            }
+        }
+
+        # 构建 assistGenerationConfig
+        if base_model and base_model != "gemini-auto":
+            assist_config = {"modelId": base_model}
+            body["streamAssistRequest"]["assistGenerationConfig"] = assist_config
+
+        # 本轮收集的内容
+        round_content = []
+        found_done_marker = False
+
         try:
-            async for json_obj in parse_json_array_stream_async(r.aiter_lines()):
-                json_objects.append(json_obj)  # 收集响应
+            async with http_client.stream(
+                "POST",
+                "https://biz-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+                headers=headers,
+                json=body,
+            ) as r:
+                if r.status_code != 200:
+                    error_text = await r.aread()
+                    raise HTTPException(status_code=r.status_code, detail=f"Upstream Error {error_text.decode()}")
 
-                # 提取文本内容
-                for reply in json_obj.get("streamAssistResponse", {}).get("answer", {}).get("replies", []):
-                    content_obj = reply.get("groundedContent", {}).get("content", {})
-                    text = content_obj.get("text", "")
+                # 使用异步解析器处理 JSON 数组流
+                async for json_obj in parse_json_array_stream_async(r.aiter_lines()):
+                    if current_attempt == 1:
+                        json_objects.append(json_obj)  # 只在第一次收集图片信息
 
-                    if not text:
-                        continue
+                    # 提取文本内容
+                    for reply in json_obj.get("streamAssistResponse", {}).get("answer", {}).get("replies", []):
+                        content_obj = reply.get("groundedContent", {}).get("content", {})
+                        text = content_obj.get("text", "")
 
-                    # 区分思考过程和正常内容
-                    if content_obj.get("thought"):
-                        # 思考过程使用 reasoning_content 字段（类似 OpenAI o1）
-                        chunk = create_chunk(chat_id, created_time, model_name, {"reasoning_content": text}, None)
-                        yield f"data: {chunk}\n\n"
-                    else:
-                        # 正常内容使用 content 字段
-                        chunk = create_chunk(chat_id, created_time, model_name, {"content": text}, None)
-                        yield f"data: {chunk}\n\n"
+                        if not text:
+                            continue
 
-            # 提取图片信息（在 async with 块内）
-            if json_objects:
-                file_ids, session_name = parse_images_from_response(json_objects)
-                if file_ids and session_name:
-                    file_ids_info = (file_ids, session_name)
-                    logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 检测到{len(file_ids)}张生成图片")
+                        # 收集原始内容（用于续传）
+                        raw_text = text
+                        if use_anti_truncation and anti_truncation_collector:
+                            anti_truncation_collector.append_content(raw_text)
+                            round_content.append(raw_text)
+
+                            # 检测 done 标记
+                            if check_done_marker(raw_text):
+                                found_done_marker = True
+                                logger.info(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 检测到 [done] 标记")
+
+                        # 清理 [done] 标记后再发送给客户端
+                        if use_anti_truncation:
+                            text = clean_done_marker_from_text(text)
+                            if not text:  # 如果清理后为空，跳过
+                                continue
+
+                        # 区分思考过程和正常内容
+                        if content_obj.get("thought"):
+                            chunk = create_chunk(chat_id, created_time, model_name, {"reasoning_content": text}, None)
+                            yield f"data: {chunk}\n\n"
+                        else:
+                            chunk = create_chunk(chat_id, created_time, model_name, {"content": text}, None)
+                            yield f"data: {chunk}\n\n"
+
+                # 提取图片信息（仅第一次请求）
+                if current_attempt == 1 and json_objects:
+                    extracted_file_ids, session_name = parse_images_from_response(json_objects)
+                    if extracted_file_ids and session_name:
+                        file_ids_info = (extracted_file_ids, session_name)
+                        logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 检测到{len(extracted_file_ids)}张生成图片")
 
         except ValueError as e:
             logger.error(f"[API] [{account_manager.config.account_id}] [req_{request_id}] JSON解析失败: {str(e)}")
+            break
         except Exception as e:
             error_type = type(e).__name__
             logger.error(f"[API] [{account_manager.config.account_id}] [req_{request_id}] 流处理错误 ({error_type}): {str(e)}")
             raise
 
+        # ===== 抗截断续传逻辑 =====
+        if not use_anti_truncation:
+            # 非抗截断模式，直接结束
+            break
+
+        # 检查是否找到 done 标记
+        if found_done_marker:
+            logger.info(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 输出完整，结束")
+            break
+
+        # 检查累积内容中是否有 done 标记（可能跨 chunk）
+        if anti_truncation_collector and anti_truncation_collector.check_accumulated_done_marker():
+            logger.info(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 累积内容中找到 [done] 标记")
+            break
+
+        # 检查是否达到最大尝试次数
+        if current_attempt >= MAX_CONTINUATION_ATTEMPTS:
+            logger.warning(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 达到最大尝试次数 {MAX_CONTINUATION_ATTEMPTS}，结束")
+            break
+
+        # 没有 done 标记，准备续传
+        collected_content = anti_truncation_collector.get_collected_content() if anti_truncation_collector else ""
+        logger.info(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 未检测到 [done] 标记，准备续传（已收集 {len(collected_content)} 字符）")
+
+        # 构建续传请求文本
+        current_text = build_continuation_text(original_text, collected_content)
+        logger.debug(f"[ANTI-TRUNCATION] [{account_manager.config.account_id}] [req_{request_id}] 续传请求: {current_text[:200]}...")
+
+        # 续传前需要刷新 JWT（可能已过期）
+        jwt = await account_manager.get_jwt(request_id)
+        headers = get_common_headers(jwt, USER_AGENT)
+
+    # 清理抗截断收集器
+    if anti_truncation_collector:
+        anti_truncation_collector.cleanup()
+
     # 在 async with 块外处理图片下载（避免占用上游连接）
     if file_ids_info:
-        file_ids, session_name = file_ids_info
+        extracted_file_ids, session_name = file_ids_info
         try:
             base_url = get_base_url(request) if request else ""
             file_metadata = await get_session_file_metadata(account_manager, session_name, http_client, USER_AGENT, request_id)
 
             # 并行下载所有图片
             download_tasks = []
-            for file_info in file_ids:
+            for file_info in extracted_file_ids:
                 fid = file_info["fileId"]
                 mime = file_info["mimeType"]
                 meta = file_metadata.get(fid, {})
@@ -1814,7 +1920,6 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
             for idx, ((fid, mime, _), result) in enumerate(zip(download_tasks, results), 1):
                 if isinstance(result, Exception):
                     logger.error(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片{idx}下载失败: {type(result).__name__}: {str(result)[:100]}")
-                    # 降级处理：返回错误提示而不是静默失败
                     error_msg = f"\n\n⚠️ 图片 {idx} 下载失败\n\n"
                     chunk = create_chunk(chat_id, created_time, model_name, {"content": error_msg}, None)
                     yield f"data: {chunk}\n\n"
@@ -1834,18 +1939,17 @@ async def stream_chat_generator(session: str, text_content: str, file_ids: List[
                     chunk = create_chunk(chat_id, created_time, model_name, {"content": error_msg}, None)
                     yield f"data: {chunk}\n\n"
 
-            logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片处理完成: {success_count}/{len(file_ids)} 成功")
+            logger.info(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片处理完成: {success_count}/{len(extracted_file_ids)} 成功")
 
         except Exception as e:
             logger.error(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片处理失败: {type(e).__name__}: {str(e)[:100]}")
-            # 降级处理：通知用户图片处理失败
             error_msg = f"\n\n⚠️ 图片处理失败: {type(e).__name__}\n\n"
             chunk = create_chunk(chat_id, created_time, model_name, {"content": error_msg}, None)
             yield f"data: {chunk}\n\n"
 
     total_time = time.time() - start_time
     logger.info(f"[API] [{account_manager.config.account_id}] [req_{request_id}] 响应完成: {total_time:.2f}秒")
-    
+
     if is_stream:
         final_chunk = create_chunk(chat_id, created_time, model_name, {}, "stop")
         yield f"data: {final_chunk}\n\n"
